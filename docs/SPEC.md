@@ -271,6 +271,137 @@ Each handler implements:
 
 **Invariant:** for a special path, `materialize(ingest(file))` is lossless (modulo intentional formatting rules).
 
+### Handler registry (how it's wired)
+
+Three pieces per special path:
+
+| Piece | Role |
+|---|---|
+| **`special_rules` row** | `(repo_id, path, handler)` — e.g. `data/settings.json` → `json:settings` |
+| **Handler class** | Registered at startup by handler id; implements ingest + materialize |
+| **Postgres table(s)** | Owned by the handler; schema migrated via Atlas in the web app |
+
+```python
+# src/git_pg/special/registry.py
+class SpecialHandler(Protocol):
+    handler_id: ClassVar[str]          # e.g. "json:settings"
+    table_names: ClassVar[tuple[str, ...]]
+
+    async def ingest(
+        self, session: AsyncSession, repo_id: int, path: str, blob: bytes
+    ) -> None: ...
+
+    async def materialize(
+        self, session: AsyncSession, repo_id: int, path: str
+    ) -> bytes: ...
+
+
+class HandlerRegistry:
+    def register(self, handler: SpecialHandler) -> None: ...
+    def get(self, handler_id: str) -> SpecialHandler: ...
+    async def ingest_path(
+        self, session: AsyncSession, repo_id: int, rule: SpecialRule, blob: bytes
+    ) -> None: ...
+    async def materialize_paths(
+        self, session: AsyncSession, repo_id: int, handler_ids: set[str]
+    ) -> dict[str, bytes]: ...   # path → blob bytes for rematerialize commit
+```
+
+**When rules are registered:** platform config (defaults per repo template) and/or rows in `special_rules`. Adding a new file type never changes the orchestrator — only a new handler + table + Atlas migration + rule entry.
+
+**Push flow:** after `git push`, for each changed path in `special_rules`, load blob from new commit → `registry.ingest_path(...)`.
+
+**Migrate flow:** after Atlas DDL/DML, for each handler touched by the migration (or all handlers for the repo), `registry.materialize_paths(...)` → write blobs into migration commit.
+
+### Adding JSON later (concrete example)
+
+Suppose you add `data/settings.json`:
+
+```json
+{
+  "theme": "dark",
+  "refresh_interval_ms": 5000,
+  "features": ["search", "export"]
+}
+```
+
+**1. Atlas migration** in `apps/demo-web/migrations/` (platform source):
+
+```sql
+CREATE TABLE settings (
+  repo_id              int PRIMARY KEY,
+  theme                text NOT NULL,
+  refresh_interval_ms  int NOT NULL,
+  features             jsonb NOT NULL    -- or text[] if you prefer
+);
+```
+
+**2. ORM model** in `src/git_pg/db/orm/settings.py`:
+
+```python
+class Settings(Base):
+    __tablename__ = "settings"
+    repo_id: Mapped[int] = mapped_column(primary_key=True)
+    theme: Mapped[str] = mapped_column()
+    refresh_interval_ms: Mapped[int] = mapped_column()
+    features: Mapped[list[str]] = mapped_column(JSONB)
+```
+
+**3. Handler** in `src/git_pg/special/json_settings.py`:
+
+```python
+class SettingsDocument(BaseModel):
+    theme: str
+    refresh_interval_ms: int
+    features: tuple[str, ...]
+
+
+class JsonSettingsHandler:
+    handler_id = "json:settings"
+    table_names = ("settings",)
+
+    async def ingest(self, session, repo_id, path, blob) -> None:
+        doc = SettingsDocument.model_validate_json(blob)
+        await session.merge(Settings(repo_id=repo_id, theme=doc.theme, ...))
+
+    async def materialize(self, session, repo_id, path) -> bytes:
+        row = await session.get(Settings, repo_id)
+        doc = SettingsDocument(
+            theme=row.theme,
+            refresh_interval_ms=row.refresh_interval_ms,
+            features=tuple(row.features),
+        )
+        return doc.model_dump_json(indent=2).encode() + b"\n"
+```
+
+**4. Register** in app startup:
+
+```python
+registry.register(JsonSettingsHandler())
+```
+
+**5. Rule** (config or DB):
+
+```yaml
+# config/special_rules.yaml (example)
+rules:
+  - path: data/settings.json
+    handler: json:settings
+```
+
+**6. Future JSON migration** (same pattern as CSV): e.g. rename `refresh_interval_ms` → `poll_interval_ms` via Atlas in the web app; rematerialize writes updated `settings.json` into a migration-authored git commit.
+
+### Handler shapes (pick per file type)
+
+| File shape | Handler pattern | Example |
+|---|---|---|
+| **Tabular** (rows) | One file → many table rows | `csv:rates` |
+| **Document** (single object) | One file → one table row | `yaml:app_config`, `json:settings` |
+| **Document array** | One file → many rows (like CSV but JSON) | `json:items` → `items(id, payload jsonb)` |
+| **Opaque binary** | No table; metadata only (v2) | `blob:metadata` → S3 pointer |
+
+JSON fits either **document** (one row per file) or **array** (one row per element) depending on the schema you want to migrate with Atlas.
+
 ---
 
 ## Special data migrations (Atlas in platform web app)
@@ -317,8 +448,19 @@ sequenceDiagram
 
 1. Web app runs `atlas migrate apply --dir file://apps/demo-web/migrations` (standard deploy step).
 2. Web app calls `git_pg.migrate.apply(migrations_dir=..., repo_id=...)` which rematerializes inside the **same transaction**.
-3. Non-special sandbox blobs unchanged (same oids in new tree).
-4. On failure → full rollback: tables **and** git refs/objects.
+3. Rematerialize writes a **real git commit** into the sandbox repo’s object store (new blob + tree + commit + ref update), not a filesystem edit.
+4. Non-special sandbox blobs unchanged (same oids in new tree).
+5. On failure → full rollback: tables **and** git refs/objects.
+
+**Migration-authored commit (required):**
+
+| Field | Value |
+|---|---|
+| **author / committer** | Migration system identity, e.g. `git-pg migration <migration@git-pg.local>` |
+| **message** | References the Atlas migration, e.g. `migrate: rates_pct_to_float (20260806120000)` |
+| **tree** | Updated `data/rates.csv` (floats) + unchanged non-special paths |
+
+After restart, `git log -1` in the sandbox shows this commit; `git show` shows the CSV diff.
 
 **After:** next `session start` on the sandbox repo clones CSV as:
 
@@ -466,7 +608,51 @@ These keep Postgres as source of truth; the cache is disposable.
 **Verification gates:**
 1. Seed → push → `session start` → tree matches
 2. Agent edit → push → new `session start` sees edit
-3. Migration `%` → float → **no FS edits** → new `session start` sees float CSV; failed migration rolls back tables **and** refs
+3. CSV migration `%` → float (see integration test below) — migration commit visible after restart
+4. Failed migration rolls back tables **and** refs (no orphan migration commit)
+
+---
+
+## Integration test: rates CSV `%` → float
+
+Canonical path for special-table migrations. File: `tests/integration/test_migrate_rates_csv.py`.
+
+### Setup
+
+1. Seed a sandbox repo in Postgres containing:
+   ```
+   data/rates.csv
+   name,rate
+   alpha,12.5%
+   beta,3%
+   ```
+2. Register `data/rates.csv` → `csv:rates` special rule; ingest into `rates` table.
+3. `session start` → assert working tree CSV still has `%` strings; note `HEAD` oid as `pre_migrate`.
+4. `session stop` (tear down sandbox dir).
+
+### Act (no sandbox, no filesystem edits of the sandbox tree)
+
+1. Apply Atlas migration `apps/demo-web/migrations/…_rates_pct_to_float.sql` against Postgres.
+2. Call `git_pg.migrate.rematerialize(repo_id)` in the **same transaction**.
+3. Assert rematerialize created a new commit oid ≠ `pre_migrate`.
+
+### Assert on restart
+
+1. `session start` again (fresh clone from Postgres).
+2. `data/rates.csv` contains floats:
+   ```csv
+   name,rate
+   alpha,0.125
+   beta,0.03
+   ```
+3. `git log -1 --format='%an <%ae>%n%s'` shows migration-system author/email and migration message.
+4. `git show HEAD -- data/rates.csv` shows the `%` → float diff.
+5. `git rev-parse HEAD^` equals `pre_migrate` (linear history; migration commit is a normal parent link).
+6. Postgres `rates.rate` column is `double precision` with float values.
+
+### Failure case (same test module)
+
+Break the rematerialize step (or use a migration that fails mid-way) → assert `HEAD` still `pre_migrate`, `rates` table unchanged, no half-applied Atlas revision.
 
 ---
 
@@ -491,6 +677,9 @@ git-pg/                               # trial → later packages/git-pg in monor
     src/deploy.py                     # atlas apply + git_pg.migrate.rematerialize
   tests/
     ...
+    integration/
+      test_migrate_rates_csv.py   # % → float; migration commit after restart
+      test_benchmark_big_repo.py
   fixtures/
     k8s-bench.dump
 ```
@@ -532,10 +721,11 @@ pre-commit install
 ### Phase 5 — Atlas migrations + rematerialize
 - Migrations in `apps/demo-web/migrations/` (platform source layout)
 - Web app deploy: `atlas migrate apply` → `git_pg.migrate.rematerialize()` in one transaction
-- Demo: rates `%` → float; sandbox repo gets updated CSV without filesystem edits
+- Rematerialize writes a git commit authored by the migration system (identity + message convention)
 
-### Phase 6 — CI round-trips
-- Include migration success and intentional failure (assert full rollback)
+### Phase 6 — CI round-trips + rates CSV integration test
+- `tests/integration/test_migrate_rates_csv.py`: seed `%` CSV → migrate → restart → float CSV + migration commit in `git log`
+- Intentional failure asserts full rollback (tables + refs)
 - CI runs `uv run ruff check`, `uv run ruff format --check`, `uv run mypy`, `uv run pytest`
 
 ### Phase 7 — Bulk seed + performance benchmarks
