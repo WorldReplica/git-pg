@@ -35,10 +35,19 @@ class WarmCacheManager:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._root = Path(settings.warm_cache_root)
+        # Serialize refresh in-process so we never block the event loop on flock.
+        self._refresh_locks: dict[str, asyncio.Lock] = {}
 
     @property
     def enabled(self) -> bool:
         return self._settings.warm_cache_enabled
+
+    def _refresh_lock(self, repo_name: str) -> asyncio.Lock:
+        lock = self._refresh_locks.get(repo_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._refresh_locks[repo_name] = lock
+        return lock
 
     async def export_session(
         self,
@@ -115,66 +124,75 @@ class WarmCacheManager:
         repo_root = self._repo_root(repo_name)
         versions_root = repo_root / "versions"
         await asyncio.to_thread(versions_root.mkdir, parents=True, exist_ok=True)
-        with _repo_lock(repo_root / "update.lock"):
-            current = _read_current_path(repo_root)
-            if expected_ref is not None and current is not None:
-                expected_oid = await store.get_ref_oid(repo_id, expected_ref)
-                if expected_oid is not None:
-                    current_oid = await asyncio.to_thread(
-                        _read_ref_oid, current, expected_ref
-                    )
-                    if current_oid == expected_oid.hex():
-                        return current
-
-            current_version = current.name if current is not None else None
-            next_status = (
-                WarmCacheStatus.UPDATING
-                if current is not None
-                else WarmCacheStatus.REBUILDING
-            )
-            await self._write_state(
-                repo_name,
-                WarmCacheState(
-                    status=next_status,
-                    current_version=current_version,
-                    updated_at=time.time(),
-                ),
-            )
-
-            next_version = versions_root / (
-                f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-            )
+        file_lock = _repo_lock(repo_root / "update.lock")
+        # asyncio.Lock first (event-loop safe); flock only in a worker thread so
+        # concurrent session starts cannot freeze the API on fcntl.flock.
+        async with self._refresh_lock(repo_name):
+            await asyncio.to_thread(file_lock.acquire)
             try:
-                if current is not None:
-                    await asyncio.to_thread(
-                        _git_clone_bare_local,
-                        current,
-                        next_version,
-                    )
-                else:
-                    await asyncio.to_thread(_git_init_bare, next_version)
-                await store.sync_bare_repo(repo_id, next_version)
-                await asyncio.to_thread(_swap_current_version, repo_root, next_version)
-                await self._write_state(
-                    repo_name,
-                    WarmCacheState(
-                        status=WarmCacheStatus.FRESH,
-                        current_version=next_version.name,
-                        updated_at=time.time(),
-                    ),
+                current = await asyncio.to_thread(_read_current_path, repo_root)
+                if expected_ref is not None and current is not None:
+                    expected_oid = await store.get_ref_oid(repo_id, expected_ref)
+                    if expected_oid is not None:
+                        current_oid = await asyncio.to_thread(
+                            _read_ref_oid, current, expected_ref
+                        )
+                        if current_oid == expected_oid.hex():
+                            return current
+
+                current_version = current.name if current is not None else None
+                next_status = (
+                    WarmCacheStatus.UPDATING
+                    if current is not None
+                    else WarmCacheStatus.REBUILDING
                 )
-                return next_version
-            except Exception as exc:
                 await self._write_state(
                     repo_name,
                     WarmCacheState(
-                        status=WarmCacheStatus.FAILED,
+                        status=next_status,
                         current_version=current_version,
-                        error=str(exc),
                         updated_at=time.time(),
                     ),
                 )
-                raise
+
+                next_version = versions_root / (
+                    f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
+                )
+                try:
+                    if current is not None:
+                        await asyncio.to_thread(
+                            _git_clone_bare_local,
+                            current,
+                            next_version,
+                        )
+                    else:
+                        await asyncio.to_thread(_git_init_bare, next_version)
+                    await store.sync_bare_repo(repo_id, next_version)
+                    await asyncio.to_thread(
+                        _swap_current_version, repo_root, next_version
+                    )
+                    await self._write_state(
+                        repo_name,
+                        WarmCacheState(
+                            status=WarmCacheStatus.FRESH,
+                            current_version=next_version.name,
+                            updated_at=time.time(),
+                        ),
+                    )
+                    return next_version
+                except Exception as exc:
+                    await self._write_state(
+                        repo_name,
+                        WarmCacheState(
+                            status=WarmCacheStatus.FAILED,
+                            current_version=current_version,
+                            error=str(exc),
+                            updated_at=time.time(),
+                        ),
+                    )
+                    raise
+            finally:
+                await asyncio.to_thread(file_lock.release)
 
     async def _current_path(self, repo_name: str) -> Path | None:
         repo_root = self._repo_root(repo_name)
@@ -268,16 +286,30 @@ def _write_state_file(path: Path, state: WarmCacheState) -> None:
 
 
 class _repo_lock:
+    """Cross-process file lock. Call acquire/release from a worker thread only."""
+
     def __init__(self, path: Path) -> None:
         self._path = path
         self._fh: TextIO | None = None
 
-    def __enter__(self) -> None:
+    def acquire(self) -> None:
         import fcntl
 
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = self._path.open("a+")
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+
+    def release(self) -> None:
+        import fcntl
+
+        if self._fh is None:
+            return
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        self._fh.close()
+        self._fh = None
+
+    def __enter__(self) -> None:
+        self.acquire()
         return None
 
     def __exit__(
@@ -286,8 +318,4 @@ class _repo_lock:
         exc: BaseException | None,
         tb: object | None,
     ) -> None:
-        import fcntl
-
-        assert self._fh is not None
-        fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-        self._fh.close()
+        self.release()
