@@ -906,9 +906,9 @@ class AgentService:
                 result = await session.execute(
                     select(AgentRun).where(AgentRun.id == run_id)
                 )
-                run = result.scalar_one_or_none()
-                if run is not None:
-                    run.session_cwd = handle.cwd
+                existing = result.scalar_one_or_none()
+                if existing is not None:
+                    existing.session_cwd = handle.cwd
                     await session.flush()
 
         # Checkout agent branch first so fetch can update refs/heads/main.
