@@ -48,6 +48,7 @@ class SessionManager:
             )
 
         elapsed_ms = (time.perf_counter() - t0) * 1000
+        _ensure_git_identity(dest)
         return SessionHandle(
             session_id=session_id,
             repo=RepoName(value=request.repo),
@@ -60,3 +61,19 @@ class SessionManager:
         path = Path(self._settings.sessions_root) / session_id
         if path.exists():
             shutil.rmtree(path)
+
+
+def _ensure_git_identity(cwd: Path) -> None:
+    """Local commits need an identity; CI runners often have none configured."""
+    import subprocess
+
+    subprocess.run(
+        ["git", "-C", str(cwd), "config", "user.email", "session@git-pg.local"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(cwd), "config", "user.name", "git-pg session"],
+        check=True,
+        capture_output=True,
+    )

@@ -43,6 +43,11 @@ jobs:
           PGPASSWORD=gitpg psql -h localhost -p 54329 -U gitpg -d gitpg -f docker/init.sql
           cd apps/demo-web && uv run alembic -c alembic.ini upgrade head
 
+      - name: Configure git identity
+        run: |
+          git config --global user.email "ci@git-pg.local"
+          git config --global user.name "git-pg ci"
+
       - name: Ruff check
         run: uv run ruff check src tests apps/demo-web/api
 
