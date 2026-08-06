@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.16.0",
     "asyncpg>=0.31.0",
+    "fastapi>=0.116.0",
+    "httpx>=0.28.1",
     "psycopg[binary]>=3.2.0",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.0.0",
@@ -17,6 +19,7 @@ dependencies = [
     "rich>=15.0.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "typer>=0.27.1",
+    "uvicorn[standard]>=0.35.0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +38,7 @@ module-root = "src"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.0",
     "mypy>=2.3.0",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
@@ -48,8 +52,8 @@ dev = [
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-mypy_path = "src"
-packages = ["git_pg"]
+mypy_path = "src:apps/demo-web"
+packages = ["git_pg", "api"]
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

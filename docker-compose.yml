@@ -16,5 +16,43 @@ services:
       timeout: 5s
       retries: 15
 
+  api:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sessions:/tmp/git-pg
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GIT_PG_DATABASE_URL: postgresql+asyncpg://gitpg:gitpg@postgres:5432/gitpg
+      GIT_PG_SESSIONS_ROOT: /tmp/git-pg/sessions
+      GIT_PG_WARM_CACHE_ROOT: /tmp/git-pg/warm
+      GIT_PG_AGENT_DOCKER_IMAGE: git-pg-agent:local
+      PYTHONPATH: /app/apps/demo-web
+    command: >
+      bash -lc "pip install -q uv && uv sync --dev
+      && cd apps/demo-web && uv run alembic -c alembic.ini upgrade head && cd ../..
+      && uv run uvicorn api.app:app --host 0.0.0.0 --port 8000 --app-dir apps/demo-web"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-off sandboxes via `docker compose run` (not started by `compose up`).
+  agent:
+    image: ${GIT_PG_AGENT_DOCKER_IMAGE:-git-pg-agent:local}
+    profiles: ["agent"]
+    working_dir: /workspace
+    # Host UID/GID overridden at run time; avoid root so Claude allows bypassPermissions.
+    user: "1000:1000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HOME: /tmp
+
 volumes:
   pgdata:
+  sessions:

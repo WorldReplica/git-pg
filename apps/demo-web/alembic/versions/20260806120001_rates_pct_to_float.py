@@ -18,11 +18,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Use chr(37) instead of '%' so psycopg does not treat it as a placeholder.
     op.alter_column(
         "rates",
         "rate",
         type_=sa.Float(),
-        postgresql_using="replace(rate, '%', '')::double precision / 100.0",
+        postgresql_using="translate(rate, chr(37), '')::double precision / 100.0",
     )
 
 
@@ -34,6 +35,6 @@ def downgrade() -> None:
         type_=sa.Text(),
         postgresql_using=(
             "trim(trailing '.' from trim(trailing '0' from "
-            "(rate * 100)::numeric::text)) || '%'"
+            "(rate * 100)::numeric::text)) || chr(37)"
         ),
     )

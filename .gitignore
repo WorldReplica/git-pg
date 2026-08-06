@@ -8,3 +8,8 @@ __pycache__/
 htmlcov/
 dist/
 *.egg-info/
+node_modules/
+apps/demo-web/web/dist/
+.env
+.env.*
+!.env.example

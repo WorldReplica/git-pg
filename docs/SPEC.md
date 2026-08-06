@@ -16,6 +16,9 @@ Python via uv with strict mypy, ruff, pre-commit. SQLAlchemy 2.0 async ORM. Clau
 - **Non-special sandbox data:** Git blobs only — **never** migrated.
 - **Migrations location:** In the **platform web app source tree** (normal web app layout) — **not** inside agent sandbox git repos stored in Postgres.
 - **After migration:** Rematerialize special file blobs **from the migrated tables inside the DB transaction** — no filesystem surgery.
+- **File versions (product):** Append-only `file_versions` rows (UUID PK) projected when `main` advances; `file_comments` FK to those UUIDs with **no ON DELETE CASCADE**. Agents push only to `agent/<id>` branches; approve fast-forwards `main` then projects versions. Live UI updates via WebSocket (no polling).
+- **Agent sandbox lifetime (intended):** Keep the sandbox (and Claude session) for a run until **approve**, **reject**, or **crash** — not tear down at first “awaiting approval”. Fan-out **agent rebase** should resume that same session (it has the change context). Demo may leave containers warm; production should **hibernate** idle sandboxes and wake them for rebase/approve work.
+- **Agent sandbox lifetime (demo now):** Workspace + Claude transcript stay warm while `awaiting_approval`; each turn is a short-lived Docker container that **resumes** `claude_session_id`. Tear down on approve / reject / fail / delete.
 
 ## Two different “git” contexts (important)
 
@@ -545,7 +548,7 @@ options = ClaudeAgentOptions(
         },
     },
     setting_sources=[],  # strict isolation — no inherited user settings
-    permission_mode="acceptEdits",
+    permission_mode="bypassPermissions",
 )
 ```
 
@@ -553,10 +556,21 @@ options = ClaudeAgentOptions(
 - **`session start`:** allocate session id, create sandbox dir, clone repo+ref from Postgres, wire `cwd` + sandbox config, return ready handle
 - **`session run`:** invoke Claude Agent SDK against that cwd
 - **`session commit`:** `git add` + `git commit` + `git push pg` after agent turns; ingest special paths into tables
-- **`session stop`:** tear down sandbox dir (default for demo; optional keep for debug)
+- **`session stop`:** tear down sandbox dir — on approve / reject / fail / delete (demo keeps the tree warm through `awaiting_approval` for same-agent rebase)
 - **`migrate apply`:** `git-pg` runs Alembic from `apps/demo-web/alembic.ini`, then rematerializes in the same DB transaction
 
 **Security:** combine SDK sandbox (OS-level Bash isolation) with permission deny rules for secrets (`.env`, `~/.ssh`). Sandbox applies to Bash subprocesses; Read/Edit tools need explicit permission denies too ([Claude sandboxing docs](https://code.claude.com/docs/en/sandboxing)).
+
+### Agent sandbox lifetime & same-agent rebase
+
+When several agents await approval and one lands on `main`, siblings must rebase. **Auto rebase** can stay mechanical (`git rebase main`). **Agent rebase** should preferably be done by the **same** agent that authored the branch: it already has the task prompt, tool history, and local working-tree intent. Spawning a cold container with a reconstructed “semantic rebase” prompt is a weaker fallback.
+
+| Phase | Behavior |
+|---|---|
+| **Current demo** | After the first agent turn, the **workspace + Claude transcript** stay warm (`session_cwd`, `claude_session_id`, HOME under `agent-home/`). Containers are short-lived per turn. Fan-out **agent rebase** resumes that same Claude session in the same workspace (cold clone only if the warm tree is gone). Tear down on approve / reject / fail / delete. |
+| **Production target** | Same logical lifetime, but **hibernate** idle sandboxes (pause / checkpoint) so waiting on human approve doesn’t burn CPU/API budget; wake on fan-out rebase or further user action. |
+
+Rationale: rebase quality tracks continuity of context more than git mechanics. Cost control belongs in hibernate/wake, not in discarding the authoring session early.
 
 ---
 

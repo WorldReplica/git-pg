@@ -36,7 +36,9 @@ async def test_yaml_app_config_ingest_materialize(engine) -> None:
             SpecialRule(repo_id=repo.id, path="config.yaml", handler="yaml:app_config")
         )
         await session.flush()
-        await push_and_ingest(session, repo_name, tmp, RefName(value="main"))
+        await push_and_ingest(
+            session, repo_name, tmp, RefName(value="main"), allow_main=True
+        )
 
         row = await session.get(AppConfig, repo.id)
         assert row is not None

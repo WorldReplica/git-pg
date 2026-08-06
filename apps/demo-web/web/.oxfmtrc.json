@@ -1,0 +1,3 @@
+{
+  "ignorePatterns": ["src/api/schema.d.ts", "openapi.json", "dist/**", "node_modules/**"]
+}

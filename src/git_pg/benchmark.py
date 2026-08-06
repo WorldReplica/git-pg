@@ -231,7 +231,9 @@ async def run_session_lifecycle_benchmark(
         blob_sizes[spec] = blob.stat().st_size
 
     t2 = time.perf_counter()
-    await orchestrator.session_push(bench_repo, Path(handle.cwd), ref=ref_name)
+    await orchestrator.session_push(
+        bench_repo, Path(handle.cwd), ref=ref_name, allow_main=True
+    )
     commit_push_ms = (time.perf_counter() - t2) * 1000
 
     t3 = time.perf_counter()

@@ -41,15 +41,48 @@ jobs:
       - name: Initialize Postgres schema
         run: |
           PGPASSWORD=gitpg psql -h localhost -p 54329 -U gitpg -d gitpg -f docker/init.sql
+          cd apps/demo-web && uv run alembic -c alembic.ini upgrade head
 
       - name: Ruff check
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests apps/demo-web/api
 
       - name: Ruff format
-        run: uv run ruff format --check src tests
+        run: uv run ruff format --check src tests apps/demo-web/api
 
       - name: Mypy
-        run: uv run mypy src
+        run: PYTHONPATH=apps/demo-web uv run mypy src apps/demo-web/api
 
       - name: Pytest
-        run: uv run pytest tests -v -m "not benchmark"
+        run: PYTHONPATH=apps/demo-web uv run pytest tests -v -m "not benchmark"
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: apps/demo-web/web/pnpm-lock.yaml
+
+      - name: Install web deps
+        working-directory: apps/demo-web/web
+        run: pnpm install --frozen-lockfile
+
+      - name: Web lint
+        working-directory: apps/demo-web/web
+        run: pnpm lint
+
+      - name: Web format
+        working-directory: apps/demo-web/web
+        run: pnpm fmt:check
+
+      - name: Web typecheck
+        working-directory: apps/demo-web/web
+        run: pnpm typecheck
+
+      - name: OpenAPI types drift check
+        working-directory: apps/demo-web/web
+        run: |
+          pnpm gen:api
+          git diff --exit-code -- src/api/schema.d.ts

@@ -93,7 +93,7 @@ async def seed_repo(engine: AsyncEngine, options: SeedOptions) -> SeedResult:
         async with session_scope(engine) as session:
             store = PostgresGitStore(session)
             repo = await store.get_or_create_repo(options.repo)
-            await store.push_from_local(repo.id, work)
+            await store.push_from_local(repo.id, work, allow_main=True)
             count = await store.count_objects(repo.id)
             blob_bytes = await store.total_blob_bytes(repo.id)
 

@@ -44,6 +44,9 @@ class Orchestrator:
         repo: str,
         local_path: Path,
         ref: str = "main",
+        *,
+        allow_main: bool = False,
+        project_versions: bool = False,
     ) -> None:
         async with session_scope(self._engine) as session:
             await push_and_ingest(
@@ -51,6 +54,8 @@ class Orchestrator:
                 repo,
                 local_path,
                 RefName(value=ref),
+                allow_main=allow_main,
+                project_versions=project_versions,
             )
         await self._refresh_warm_cache(repo)
 

@@ -118,9 +118,7 @@ async def test_warm_cache_lifecycle_with_timing(
             "note": "expected to build warm cache then clone",
         }
     )
-    handle1 = await orch.session_start(
-        SessionStartRequest(repo=repo_name, ref="main")
-    )
+    handle1 = await orch.session_start(SessionStartRequest(repo=repo_name, ref="main"))
     first_spin_up_ms = handle1.spin_up_ms
     first_log = _git_log(handle1.cwd)
     readme = Path(handle1.cwd) / "README.md"
@@ -167,7 +165,7 @@ async def test_warm_cache_lifecycle_with_timing(
         }
     )
     t1 = time.perf_counter()
-    await orch.session_push(repo_name, Path(handle1.cwd), ref="main")
+    await orch.session_push(repo_name, Path(handle1.cwd), ref="main", allow_main=True)
     push_and_refresh_ms = (time.perf_counter() - t1) * 1000
     orch.session_stop(handle1.session_id)
 
@@ -195,9 +193,7 @@ async def test_warm_cache_lifecycle_with_timing(
             "note": "expected to clone updated warm cache (edits present)",
         }
     )
-    handle2 = await orch.session_start(
-        SessionStartRequest(repo=repo_name, ref="main")
-    )
+    handle2 = await orch.session_start(SessionStartRequest(repo=repo_name, ref="main"))
     second_spin_up_ms = handle2.spin_up_ms
     second_log = _git_log(handle2.cwd)
     second_readme = (Path(handle2.cwd) / "README.md").read_text()

@@ -116,8 +116,7 @@ def _select_benchmark_preset() -> str:
         )
         blobs = f", blobs={','.join(preset.blobs)}" if preset.blobs else ""
         rprint(
-            f"  [cyan]{i}[/cyan]  {preset.id} — "
-            f"{preset.description} ({clone}{blobs})"
+            f"  [cyan]{i}[/cyan]  {preset.id} — {preset.description} ({clone}{blobs})"
         )
     rprint("")
     while True:

@@ -46,6 +46,15 @@ class PostgresGitStore:
             return None
         return RepoRecord(id=repo.id, name=repo.name)
 
+    async def get_repo_by_id(self, repo_id: int) -> RepoRecord | None:
+        result = await self._session.execute(
+            select(Repository).where(Repository.id == repo_id)
+        )
+        repo = result.scalar_one_or_none()
+        if repo is None:
+            return None
+        return RepoRecord(id=repo.id, name=repo.name)
+
     async def put_object(
         self,
         repo_id: int,
@@ -232,14 +241,79 @@ class PostgresGitStore:
             """
         )
 
-    async def push_from_local(self, repo_id: int, local_path: Path) -> GitOid:
+    async def push_from_local(
+        self,
+        repo_id: int,
+        local_path: Path,
+        *,
+        allow_main: bool = False,
+        require_fast_forward: bool = True,
+    ) -> GitOid:
         objects = await asyncio.to_thread(_cat_file_batch, local_path)
         await self.put_objects_bulk(repo_id, objects)
 
         head = await asyncio.to_thread(_rev_parse, local_path, "HEAD")
         branch = await asyncio.to_thread(_symbolic_ref, local_path, "HEAD")
-        await self.set_ref(repo_id, branch, bytes.fromhex(head))
+        if branch in {"refs/heads/main", "refs/heads/master"} and not allow_main:
+            msg = f"refusing to update protected branch {branch} via agent push"
+            raise PermissionError(msg)
+
+        new_oid = bytes.fromhex(head)
+        current = await self.get_ref_oid(repo_id, RefName(value=branch))
+        if (
+            require_fast_forward
+            and current is not None
+            and current != new_oid
+            and not await self.is_ancestor(repo_id, current, new_oid)
+        ):
+            msg = f"non-fast-forward update rejected for {branch}"
+            raise ValueError(msg)
+
+        await self.set_ref(repo_id, branch, new_oid)
         return GitOid(hex=head)
+
+    async def is_ancestor(
+        self,
+        repo_id: int,
+        maybe_ancestor: bytes,
+        descendant: bytes,
+    ) -> bool:
+        if maybe_ancestor == descendant:
+            return True
+        seen: set[bytes] = set()
+        stack = [descendant]
+        while stack:
+            oid = stack.pop()
+            if oid in seen:
+                continue
+            seen.add(oid)
+            if oid == maybe_ancestor:
+                return True
+            content = await self.get_object(repo_id, oid)
+            obj_type = await self.get_object_type(repo_id, oid)
+            if content is None or obj_type != ObjectType.COMMIT:
+                continue
+            parents, _tree = _parse_commit_links(content)
+            stack.extend(parents)
+        return False
+
+    async def fast_forward_ref(
+        self,
+        repo_id: int,
+        ref: RefName,
+        new_oid: bytes,
+    ) -> bytes | None:
+        """Move ref to new_oid if FF. Returns previous oid (or None if created)."""
+        current = await self.get_ref_oid(repo_id, ref)
+        if (
+            current is not None
+            and current != new_oid
+            and not await self.is_ancestor(repo_id, current, new_oid)
+        ):
+            msg = f"non-fast-forward update rejected for {ref.heads_name}"
+            raise ValueError(msg)
+        await self.set_ref(repo_id, ref.heads_name, new_oid)
+        return current
 
     async def export_to_local(
         self,

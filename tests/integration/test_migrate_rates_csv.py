@@ -55,7 +55,9 @@ async def _seed_rates_repo(engine, repo_name: str) -> str:
             SpecialRule(repo_id=repo.id, path="data/rates.csv", handler="csv:rates")
         )
         await session.flush()
-        await push_and_ingest(session, repo_name, local, RefName(value="main"))
+        await push_and_ingest(
+            session, repo_name, local, RefName(value="main"), allow_main=True
+        )
         oid = await store.get_ref_oid(repo.id, RefName(value="main"))
         assert oid is not None
         return oid.hex()

@@ -57,7 +57,9 @@ async def test_roundtrip_push_and_session_start(engine) -> None:
     async with session_scope(engine) as session:
         await session.execute(delete(Repository).where(Repository.name == repo_name))
         await session.flush()
-        await push_and_ingest(session, repo_name, local, RefName(value="main"))
+        await push_and_ingest(
+            session, repo_name, local, RefName(value="main"), allow_main=True
+        )
 
     mgr = SessionManager(engine, settings)
     handle = await mgr.start(SessionStartRequest(repo=repo_name, ref="main"))
@@ -84,7 +86,9 @@ async def test_special_csv_ingest(engine) -> None:
             SpecialRule(repo_id=repo.id, path="data/rates.csv", handler="csv:rates")
         )
         await session.flush()
-        await push_and_ingest(session, repo_name, local, RefName(value="main"))
+        await push_and_ingest(
+            session, repo_name, local, RefName(value="main"), allow_main=True
+        )
 
         result = await session.execute(select(Rate).where(Rate.repo_id == repo.id))
         rows = list(result.scalars().all())

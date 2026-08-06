@@ -54,7 +54,9 @@ async def test_agent_edit_commit_push_roundtrip(engine) -> None:
     async with session_scope(engine) as session:
         await session.execute(delete(Repository).where(Repository.name == repo_name))
         await session.flush()
-        await push_and_ingest(session, repo_name, local, RefName(value="main"))
+        await push_and_ingest(
+            session, repo_name, local, RefName(value="main"), allow_main=True
+        )
 
     mgr = SessionManager(engine, settings)
     handle = await mgr.start(SessionStartRequest(repo=repo_name, ref="main"))
@@ -78,6 +80,7 @@ async def test_agent_edit_commit_push_roundtrip(engine) -> None:
             repo_name,
             Path(handle.cwd),
             RefName(value="main"),
+            allow_main=True,
         )
     mgr.stop(handle.session_id)
 
