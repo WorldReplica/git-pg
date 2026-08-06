@@ -1,0 +1,5 @@
+rules:
+  - path: data/rates.csv
+    handler: csv:rates
+  - path: config.yaml
+    handler: yaml:app_config

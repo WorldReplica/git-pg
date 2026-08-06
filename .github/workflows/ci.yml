@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: gitpg
+          POSTGRES_PASSWORD: gitpg
+          POSTGRES_DB: gitpg
+        ports:
+          - 54329:5432
+        options: >-
+          --health-cmd "pg_isready -U gitpg -d gitpg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      GIT_PG_DATABASE_URL: postgresql+asyncpg://gitpg:gitpg@localhost:54329/gitpg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Initialize Postgres schema
+        run: |
+          PGPASSWORD=gitpg psql -h localhost -p 54329 -U gitpg -d gitpg -f docker/init.sql
+
+      - name: Ruff check
+        run: uv run ruff check src tests
+
+      - name: Ruff format
+        run: uv run ruff format --check src tests
+
+      - name: Mypy
+        run: uv run mypy src
+
+      - name: Pytest
+        run: uv run pytest tests -v -m "not benchmark"
